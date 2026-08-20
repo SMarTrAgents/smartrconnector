@@ -110,7 +110,8 @@ def test_bindung_traegt_ihre_riegel():
     assert "    finally:\n        if con is not None:\n            con.close()" in block
 
 
-@pytest.mark.skipif(not os.path.exists(PROBE), reason="Startprobe fehlt")
+@pytest.mark.skipif(not (os.path.exists(PROBE) and os.path.exists(KOPIE)),
+                    reason="Startprobe oder gateway_mit_ticket.py fehlt")
 def test_startprobe_laeuft_durch():
     fehlt = _fehlende_abhaengigkeiten()
     if fehlt:
@@ -121,6 +122,7 @@ def test_startprobe_laeuft_durch():
     assert "Startprobe bestanden" in erg.stdout
 
 
+@pytest.mark.skipif(not os.path.exists(KOPIE), reason="gateway_mit_ticket.py fehlt")
 def test_bindung_antwortet_auch_wenn_die_datenbank_nicht_aufgeht():
     """Kein Weg endet ohne Antwort — auch nicht der wahrscheinlichste.
 

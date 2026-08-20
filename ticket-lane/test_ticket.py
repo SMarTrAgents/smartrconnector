@@ -821,6 +821,16 @@ def test_confirm_mit_cross_site_kopf_wird_abgewiesen(klient, reauth):
     assert antwort.json()["error"] == "herkunft_ungueltig"
 
 
+def test_confirm_mit_falschem_sec_mode_wird_abgewiesen(klient, reauth):
+    """Befund ⑦: ein vorhandener Sec-Fetch-Mode != cors ist ein Fehlschlag der
+    Herkunftsbindung (§7.1, Punkt 3) → 403 herkunft_ungueltig. Bisher deckte
+    kein Test diesen Zweig, nur den Sec-Fetch-Site-Zweig."""
+    daten = antrag(klient).json()
+    antwort = freigabe(klient, daten["rid"], daten["verify_word"], sec_mode="no-cors")
+    assert antwort.status_code == 403
+    assert antwort.json()["error"] == "herkunft_ungueltig"
+
+
 def test_confirm_ohne_sec_fetch_koepfe_geht_durch(klient, reauth):
     # Alte Browser senden sie nicht; vorhanden müssen sie stimmen, fehlend
     # sind sie kein Grund, einen Menschen auszusperren.
@@ -828,6 +838,32 @@ def test_confirm_ohne_sec_fetch_koepfe_geht_durch(klient, reauth):
     antwort = freigabe(klient, daten["rid"], daten["verify_word"],
                        sec_site=None, sec_mode=None)
     assert antwort.status_code == 200
+
+
+def test_confirm_falscher_ursprung_zerstoert_freigegebene_sitzung_nicht(klient, reauth, modul):
+    """Befund ①: Ein /confirm mit falschem Ursprung auf einen bereits per
+    Sitzungsfreigabe (E15) bewilligten Vorgang muss 409 antrag_bereits_entschieden
+    liefern und den Vorgang samt Ticket UNANGETASTET lassen. Vor der Reihenfolge-
+    korrektur (Zustand vor Herkunft) verbrannte die Herkunftsprüfung hier den
+    schon freigegebenen Schein und nullte sein Ticket."""
+    daten = leseantrag(klient).json()
+    assert daten["state"] == "approved"
+    with modul.db() as conn:
+        vorher = modul._lade(conn, daten["rid"])
+    assert vorher["zustand"] == "approved" and vorher["ticket"]
+
+    # Bösartiger /confirm aus der Erweiterung auf den schon freigegebenen Vorgang.
+    antwort = freigabe(klient, daten["rid"], ursprung=EXT_URSPRUNG, sec_site="cross-site")
+    assert antwort.status_code == 409
+    assert antwort.json()["error"] == "antrag_bereits_entschieden"
+
+    # Der Vorgang steht unverändert, das Ticket ist noch da.
+    with modul.db() as conn:
+        nachher = modul._lade(conn, daten["rid"])
+    assert nachher["zustand"] == "approved" and nachher["ticket"]
+    # Und die Erweiterung kann den Schein regulär abholen.
+    geholt = abholung(klient, daten["rid"], daten["redeem_key"]).json()
+    assert geholt["state"] == "approved" and geholt["ticket"]
 
 
 def test_unangemeldeter_kann_keinen_fremden_vorgang_abschiessen(klient, reauth, modul):

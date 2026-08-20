@@ -309,8 +309,11 @@ async def _rufe(name: str, *args):
 @contextlib.contextmanager
 def db():
     conn = sqlite3.connect(_db_pfad(), timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
     try:
+        # Das Pragma steht INNERHALB des try (Befund ②): wirft es (Platte voll,
+        # Sperre), muss conn.close() im finally trotzdem laufen, sonst leckt die
+        # Verbindung samt Dateizeiger und Sperre.
+        conn.execute("PRAGMA journal_mode=WAL")
         with conn:
             yield conn
     finally:
@@ -1054,17 +1057,23 @@ async def link_confirm(request: Request):
         if not vorgang or vorgang["user_id"] != wer["user_id"]:
             raise LinkFehler(404, "antrag_unbekannt")
 
-        # 3. Herkunft (§7.1). Ein Aufruf aus der Erweiterung verbrennt den
-        #    Vorgang sofort — jetzt aber nachweislich den eigenen.
-        _pruefe_herkunft_confirm(request, koerper, vorgang)
-
-        # 4. Zustand.
+        # 3. Zustand ZUERST (Befund ①). Identität und Eigentum sind geklärt,
+        #    also darf ein bereits entschiedener Vorgang hier mit 409 abbiegen,
+        #    BEVOR die Herkunftsprüfung ihn anfassen könnte. Sonst verbrennt ein
+        #    /confirm mit falschem Ursprung einen bereits freigegebenen
+        #    Sitzungsschein (E15/E16) und macht dessen Ticket zunichte, statt
+        #    409 antrag_bereits_entschieden zu liefern.
         zustand = _zustand_jetzt(vorgang)
         if zustand == "expired":
             raise LinkFehler(410, "antrag_abgelaufen")
         if zustand != "pending":
             raise LinkFehler(409, "antrag_bereits_entschieden",
                              f"Dieser Vorgang steht auf '{zustand}'.")
+
+        # 4. Herkunft (§7.1). Ein Aufruf aus der Erweiterung verbrennt den
+        #    Vorgang sofort — jetzt aber nachweislich den eigenen und nur einen,
+        #    der noch offen ist.
+        _pruefe_herkunft_confirm(request, koerper, vorgang)
 
         # 5. Ablehnen geht immer und ohne Kennwort. Wer abbrechen will, soll
         #    nicht erst etwas abtippen müssen.
@@ -1202,19 +1211,28 @@ async def link_redeem(request: Request):
         if zustand == "expired":
             raise LinkFehler(410, "antrag_abgelaufen")
 
-        ticket = vorgang["ticket"]
         # Das Verbrennen und das Ausliefern müssen dieselbe Schreiboperation
         # sein: nur wer die Zeile von 'approved' wegbewegt, bekommt das Ticket.
+        # Die gespeicherte `ticket`-Spalte dient nur noch als Beleg, dass eine
+        # Freigabe vorliegt.
+        vorhanden = vorgang["ticket"]
         with db() as conn:
             geaendert = conn.execute(
                 "UPDATE link_vorgaenge SET zustand='consumed', ticket=NULL, entschieden_at=? "
                 "WHERE rid=? AND zustand='approved'", (time.time(), rid)).rowcount
-        if not geaendert or not ticket:
+        if not geaendert or not vorhanden:
             raise LinkFehler(410, "ticket_bereits_abgeholt")
 
         gewaehrt = json.loads(vorgang["gewaehrt_json"])
+        # Das Ticket erst JETZT prägen (Befund ③/⑤): so beginnt seine 60-s-Frist
+        # (TICKET_TTL) beim Abholen und nicht schon bei Freigabe oder Anfrage.
+        # Die Sitzungsfreigabe prägte bereits bei /request; ein Abruf später als
+        # 60 s bekam sonst ein abgelaufenes Ticket. Erst der Gewinner des
+        # atomaren Wechsels auf 'consumed' prägt — zwei Tickets kann es so nicht
+        # geben.
+        ticket, jti, _ = baue_ticket(vorgang, gewaehrt)
         protokoll("ticket_abgeholt", rid, wer["user_id"], vorgang["tenant"],
-                  {"jti": vorgang["ticket_jti"]})
+                  {"jti": jti})
         # `granted` dient hier ausschließlich der Anzeige. Was die Erweiterung
         # tun darf, steht in auth_ok — nirgends sonst (§5.3).
         return {"rid": rid, "state": "approved", "ticket": ticket,

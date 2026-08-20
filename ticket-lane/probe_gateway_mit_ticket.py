@@ -546,6 +546,72 @@ def hauptlauf() -> int:
            f"(gefunden {len(einfuegung)}, geschlossen "
            f"{sum(1 for v in einfuegung if v.geschlossen)})")
 
+    print("14. Kontopasswort-Sperre, Kontingent, passwortloses Konto (Befunde ④⑥⑧)")
+
+    def _lege_konto_an(uid, tenant, *, abo="2099-01-01T00:00:00", guthaben=50000, pw=PASSWORT):
+        con = gw.db()
+        con.execute(
+            "INSERT INTO users (id,email,name,tier,token_balance,subscription_until,"
+            "added_date,entitlements,is_partner_contact,created_at,password_hash,role,"
+            "totp_enabled,terms_version,terms_accepted_at,email_verified,container_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (uid, uid + "@example.org", "K", "professional", guthaben, abo,
+             gw.now_iso(), "[]", 0, gw.now_iso(),
+             (gw.ph.hash(pw) if pw else None), "user", 0, gw.TERMS_VERSION,
+             gw.now_iso(), 1, tenant))
+        con.commit()
+        con.close()
+
+    def _kopf(uid):
+        return {"Authorization": "Bearer " + gw.make_jwt(uid, uid + "@example.org", "user", ["pwd"])}
+
+    def _confirm(uid, rid, verify_word, passwort):
+        return c.post("/api/v1/link/confirm",
+                      json={"rid": rid, "confirm": True, "origin": WEB_ORIGIN,
+                            "verify_word": verify_word, "access": "read", "duration": 600,
+                            "mode": "tab", "allow": ["geizhals.de"], "step_mode": "confirm_each",
+                            "reauth": {"method": "password", "assertion": passwort}},
+                      headers={**_kopf(uid), "Origin": WEB_ORIGIN})
+
+    # ④ Nach LINK_REAUTH_MAX_FEHLER Fehlversuchen ist auch das RICHTIGE
+    #    Kontopasswort gesperrt. Ein Fehlversuch verbrennt den Vorgang nicht,
+    #    also bleibt derselbe rid nutzbar; nur das Kontopasswort wechselt.
+    _lege_konto_an("u-sperre", "tnt-sperre")
+    a_s = c.post("/api/v1/link/request", json=antrag,
+                 headers={**_kopf("u-sperre"), "Origin": EXT_ORIGIN}).json()
+    max_f = getattr(gw, "LINK_REAUTH_MAX_FEHLER", 10)
+    alle_403 = all(_confirm("u-sperre", a_s["rid"], a_s["verify_word"], "falsch").status_code == 403
+                   for _ in range(max_f))
+    pruefe(alle_403, f"{max_f} Fehlversuche beim Kontopasswort ergeben je 403")
+    gesperrt = _confirm("u-sperre", a_s["rid"], a_s["verify_word"], PASSWORT)
+    pruefe(gesperrt.status_code == 403 and gesperrt.json().get("error") == "reauth_erforderlich",
+           f"nach {max_f} Fehlversuchen ist auch das RICHTIGE Kontopasswort gesperrt "
+           f"(war {gesperrt.status_code}: {gesperrt.text[:160]})")
+
+    # ⑥ Ohne aktives Abo wird schon der Antrag mit 402 kontingent abgewiesen,
+    #    nicht erst die Sitzung; dasselbe bei aufgebrauchtem Guthaben.
+    _lege_konto_an("u-arm", "tnt-arm", abo="2000-01-01T00:00:00")
+    arm = c.post("/api/v1/link/request", json=antrag,
+                 headers={**_kopf("u-arm"), "Origin": EXT_ORIGIN})
+    pruefe(arm.status_code == 402 and arm.json().get("error") == "kontingent",
+           f"Konto ohne aktives Abo → 402 kontingent (war {arm.status_code}: {arm.text[:160]})")
+    _lege_konto_an("u-leer", "tnt-leer", guthaben=0)
+    leer_g = c.post("/api/v1/link/request", json=antrag,
+                    headers={**_kopf("u-leer"), "Origin": EXT_ORIGIN})
+    pruefe(leer_g.status_code == 402 and leer_g.json().get("error") == "kontingent",
+           f"Konto ohne Guthaben → 402 kontingent (war {leer_g.status_code}: {leer_g.text[:160]})")
+
+    # ⑧ Konto ganz ohne Kontopasswort (reiner Google-/Apple-Login): die Freigabe
+    #    wird verweigert, nicht übersprungen. Braucht Abo+Guthaben, damit der
+    #    Antrag überhaupt bis zum reauth kommt.
+    _lege_konto_an("u-ohne-pw", "tnt-ohnepw", pw=None)
+    a_o = c.post("/api/v1/link/request", json=antrag,
+                 headers={**_kopf("u-ohne-pw"), "Origin": EXT_ORIGIN}).json()
+    kein_pw = _confirm("u-ohne-pw", a_o["rid"], a_o["verify_word"], "irgendein-passwort")
+    pruefe(kein_pw.status_code == 403 and kein_pw.json().get("error") == "reauth_erforderlich",
+           f"Konto ohne Kontopasswort → keine Freigabe, 403 reauth_erforderlich "
+           f"(war {kein_pw.status_code}: {kein_pw.text[:160]})")
+
     print()
     if fehler:
         print(f"NICHT BESTANDEN — {len(fehler)} Prüfpunkte offen:")
