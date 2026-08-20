@@ -1,0 +1,4 @@
+{
+  "chat_model_name": "qwen3.5:cloud",
+  "util_model_name": "gemma4:cloud"
+}

@@ -1,0 +1,7 @@
+title: SMarTrBrowser
+description: Browser-Profil für SMarTrChrome — steuert den Chrome des Nutzers über
+  SMarTrLink, ausschließlich mit einer einzeln freigegebenen Sitzung. Codeausführung,
+  Dateizugriff, Mailversand und Gedächtnisschreiben sind in diesem Profil entzogen.
+context: Nicht für die Alltagsauswahl gedacht. Browser-Kontexte legt ausschließlich
+  das Gateway über den SMarTrLink-Sitzungsschein an; andere Agenten wählen dieses
+  Profil nicht.

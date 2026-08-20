@@ -1,0 +1,5 @@
+name: smartrlink
+title: SMarTrLink
+description: Nimmt den Sitzungsschein einer freigegebenen Browsersitzung entgegen.
+version: 1.0.0
+always_enabled: true
