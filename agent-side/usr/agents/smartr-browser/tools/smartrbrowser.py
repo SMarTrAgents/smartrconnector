@@ -121,8 +121,51 @@ HUELLE_ZU = "--- ENDE SEITENINHALT ---"
 
 VERLAUF_STUMMEL = (
     "[Seitenwahrnehmung eines früheren Schritts entfernt — "
-    "vollständig steht immer nur der neueste Snapshot im Kontext.]"
+    "vollständig stehen immer nur der neueste Snapshot und der aktuelle "
+    "Merkzettel im Kontext.]"
 )
+
+# --------------------------------------------------------------------------
+# Der Merkzettel — das Gedächtnis für den einen Auftrag
+#
+# Der gemessene Vergessens-Weg (Befund 22.08.2026): `extract`-Ernten stehen in
+# der Hülle, und die Verlaufsbereinigung kürzt jede frühere Hülle auf einen
+# Einzeiler, sobald der nächste Befehl läuft. Wer in Schritt 5 zwanzig Kanäle
+# einsammelt und in Schritt 6 weiterklickt, hat sie in Schritt 7 nicht mehr im
+# Kontext — es sei denn, das Modell hat sie vorher selbst wiederholt, und das
+# tat es nicht, weil niemand es ihm sagte. Die Gedächtniswerkzeuge sind in
+# diesem Profil mit Absicht entzogen (memory.md), also braucht der Auftrag
+# einen Ort, der BEIDES ist: für das Modell beschreibbar und von der
+# Bereinigung ausgenommen.
+#
+# Der Merkzettel ist dieser Ort. Die Aktion `merken` schreibt ihn, jede
+# Antwort dieses Werkzeugs trägt ihn vollständig — und die Bereinigung zieht
+# ältere Abschriften genauso ein wie alte Snapshots, sodass im Kontext immer
+# genau EINE aktuelle Abschrift steht. `merken` geht nie auf den Draht und
+# kostet keinen der 40 Schritte.
+#
+# Der Schlüssel trägt den führenden Unterstrich aus demselben Grund wie der
+# Sitzungsschein: persist_chat filtert ihn beim Speichern heraus, Notizen über
+# fremde Webseiten landen nie auf Platte.
+# --------------------------------------------------------------------------
+ZETTEL_SCHLUESSEL = "_smartrlink_zettel"
+
+MERKZETTEL_AUF = "--- MERKZETTEL (dein eigener Zwischenstand zu diesem Auftrag) ---"
+MERKZETTEL_ZU = "--- ENDE MERKZETTEL ---"
+
+# Alle Marker, die eine Notiz nicht enthalten darf. Eine Notiz zitiert oft
+# Seitentext — trüge sie einen Marker, könnte sie die Hülle von innen schließen
+# oder einen falschen Merkzettel eröffnen.
+ALLE_MARKER = (HUELLE_AUF, HUELLE_ZU, MERKZETTEL_AUF, MERKZETTEL_ZU)
+
+# Deckel des Zettels. Großzügig für einen Sammelauftrag (20 Fundstellen mit je
+# ein paar Angaben sind ~2.000 Zeichen), aber ein hartes Ende vor dem
+# Kontextfenster: Ein voller Zettel verlangt `zusammenfassen`, kein stilles
+# Wegwerfen der ältesten Notiz — was verschwindet, entscheidet das Modell.
+ZETTEL_AUFTRAG_DECKEL = 640
+ZETTEL_NOTIZ_DECKEL = 500
+ZETTEL_NOTIZEN_DECKEL = 120
+ZETTEL_ZEICHEN_DECKEL = 8_000
 
 # Zulässige Gründe für ein Bildschirmfoto. Geschlossene Menge, damit „weil ich
 # gerade nicht weiterweiß" nicht zum Regelweg wird.
@@ -415,12 +458,18 @@ def _plugin_bietet_dem_agenten_etwas(ordner: list[str]) -> bool:
 
 
 def _marker_entschaerfen(text: str) -> str:
-    """Nimmt einem Text die Fähigkeit, die Hülle zu öffnen oder zu schließen.
+    """Nimmt einem Text die Fähigkeit, einen der Blöcke zu öffnen oder zu schließen.
 
     Eine Seite, die den Endemarker enthält, könnte sonst so tun, als spräche wieder
-    das System — und alles danach wäre für das Modell wieder Anweisung.
+    das System — und alles danach wäre für das Modell wieder Anweisung. Seit dem
+    Merkzettel gilt das für ALLE vier Marker (Befund der Gegenprüfung 22.08.2026):
+    Ein Seitentext, der `--- MERKZETTEL … ---` trägt, würde sonst einen
+    GEFÄLSCHTEN Zettel einschleusen — und der Systemprompt lehrt das Modell, der
+    Merkzettel sei seine eigene, vertrauenswürdige Arbeit.
     """
-    return text.replace(HUELLE_ZU, "[---]").replace(HUELLE_AUF, "[---]")
+    for marker in ALLE_MARKER:
+        text = text.replace(marker, "[---]")
+    return text
 
 
 def _seitenwort(wert: Any, deckel: int = 200) -> str:
@@ -428,6 +477,20 @@ def _seitenwort(wert: Any, deckel: int = 200) -> str:
 
     Zeilenumbrüche machen aus einer Angabe einen Absatz — und aus einem Titel einen
     gefälschten Systemsatz. Deshalb: eine Zeile, gedeckelt, entschärft.
+    """
+    text = " ".join(str(wert if wert is not None else "").split())
+    if len(text) > deckel:
+        text = text[:deckel] + "…"
+    return _marker_entschaerfen(text)
+
+
+def _zettelwort(wert: Any, deckel: int) -> str:
+    """Eine Notiz für den Merkzettel, zetteltauglich gemacht.
+
+    Dieselbe Bauform wie `_seitenwort`, nur mit eigenem Deckel: Eine Notiz
+    zitiert oft Seitentext, und ein Marker darin würde die Hülle von innen
+    schließen oder einen falschen Merkzettel eröffnen — `_marker_entschaerfen`
+    nimmt seit der Gegenprüfung alle vier Marker heraus.
     """
     text = " ".join(str(wert if wert is not None else "").split())
     if len(text) > deckel:
@@ -465,9 +528,23 @@ class SMarTrBrowser(Tool):
                 "fragt ihn bei JEDEM Schritt an seinem eigenen Bildschirm, und du bekommst "
                 "seine Antwort als Ergebnis. Sende den Schritt einfach."
             )
+        if aktion == "merken":
+            # Der Merkzettel geht nie auf den Draht und kostet keinen Schritt.
+            # Er steht deshalb VOR der Drahtbefehlsliste — dort gehört er nie
+            # hinein, sonst hielte die Drift-Prüfung ihn gegen Relay und
+            # Erweiterung, die ihn zu Recht nicht kennen.
+            verstoss = self._argumente_pruefen()
+            if verstoss:
+                return self._hinweis(verstoss)
+            sitzung, sitzungsfehler = self._sitzung_lesen()
+            if sitzungsfehler:
+                return self._hinweis(sitzungsfehler)
+            assert sitzung is not None
+            return self._merken(sitzung)
+
         if aktion not in BEFEHLE:
             return self._hinweis(
-                f"Unbekannte Aktion {aktion!r}. Erlaubt sind ausschließlich: "
+                f"Unbekannte Aktion {aktion!r}. Erlaubt sind ausschließlich: merken, "
                 + ", ".join(sorted(BEFEHLE))
                 + ". Es gibt kein `eval`, kein `terminal`, keinen Dateizugriff."
             )
@@ -502,12 +579,18 @@ class SMarTrBrowser(Tool):
         if deckel:
             return Response(message=deckel, break_loop=hart)
 
-        # Vor dem neuen Ergebnis: alle älteren Wahrnehmungen zu Einzeilern kürzen.
-        self._verlauf_bereinigen()
-
         schritt, schrittfehler = self._schritt_bauen(aktion, zaehler)
         if schrittfehler:
             return self._hinweis(schrittfehler)
+
+        # Vor dem neuen Ergebnis: alle älteren Wahrnehmungen zu Einzeilern kürzen.
+        # NACH `_schritt_bauen`, nicht davor (Befund der Gegenprüfung 22.08.2026):
+        # Ein Schrittbaufehler kommt als `_hinweis` OHNE Zettelblock zurück — wäre
+        # die letzte Zettelabschrift da schon gestummelt, stünde in diesem Moment
+        # KEINE mehr im Kontext, während jeder Stummel das Gegenteil behauptet.
+        # Ab hier gibt es nur noch Antworten über `_antwort_formatieren`, und die
+        # tragen die neue Abschrift.
+        self._verlauf_bereinigen()
 
         zaehler["schritte"] = int(zaehler.get("schritte", 0)) + 1
         schrittnr = zaehler["schritte"]
@@ -656,6 +739,123 @@ class SMarTrBrowser(Tool):
             alle[sitzung["task_id"]] = stand
             self.agent.context.set_data(ZAEHLER_SCHLUESSEL, alle)
         return stand
+
+    # ----------------------------------------------------------------------
+    # Der Merkzettel
+    # ----------------------------------------------------------------------
+
+    def _zettel(self, sitzung: dict[str, Any]) -> dict[str, Any]:
+        """Der Zettel dieses AUFTRAGS — bewusst NICHT je task_id (Befund der
+        Gegenprüfung 22.08.2026): Die task_id fällt ohne Angabe auf `t_<code>`
+        zurück, und der beworbene Weg „mit einer neuen Freigabe weitermachen"
+        bekäme damit einen leeren Zettel — alle Funde des Sammelauftrags weg,
+        obwohl derselbe Auftrag weiterläuft. Der Kontext IST der Auftrag
+        (einbau.md: je Sitzung neuer Kontext, kein Wiederverwenden), also gibt
+        es hier genau einen Zettel je Kontext."""
+        _ = sitzung  # die Sitzung wechselt, der Auftrag bleibt
+        alle = self.agent.context.get_data(ZETTEL_SCHLUESSEL)
+        if not isinstance(alle, dict):
+            alle = {}
+        stand = alle.get("auftrag")
+        if not isinstance(stand, dict):
+            stand = {"auftrag": "", "notizen": []}
+            alle["auftrag"] = stand
+            self.agent.context.set_data(ZETTEL_SCHLUESSEL, alle)
+        if not isinstance(stand.get("notizen"), list):
+            stand["notizen"] = []
+        return stand
+
+    def _merken(self, sitzung: dict[str, Any]) -> Response:
+        auftrag = _zettelwort(self.args.get("auftrag"), ZETTEL_AUFTRAG_DECKEL)
+        notiz = _zettelwort(self.args.get("notiz"), ZETTEL_NOTIZ_DECKEL)
+        zusammenfassung = _zettelwort(self.args.get("zusammenfassen"), ZETTEL_ZEICHEN_DECKEL)
+
+        if not (auftrag or notiz or zusammenfassung):
+            return self._hinweis(
+                "`merken` braucht mindestens eines dieser Felder: `auftrag` (das Ziel dieses "
+                "Auftrags, mit Erfolgsmaß — z. B. \"20 deutsche KI-Kanäle auf Instagram finden\"), "
+                "`notiz` (EIN Fund oder EIN erledigter Schritt, wird angehängt) oder "
+                "`zusammenfassen` (ersetzt alle bisherigen Notizen durch diesen einen Stand). "
+                "Es wurde nichts gesendet und nichts verändert."
+            )
+        if notiz and zusammenfassung:
+            return self._hinweis(
+                "Entweder `notiz` (hängt an) oder `zusammenfassen` (ersetzt alles) — beides "
+                "zugleich wäre zweideutig: Gehört die Notiz zum alten Stand oder zum neuen? "
+                "Es wurde nichts verändert."
+            )
+
+        # Der Voll-Deckel wird VOR jeder Veränderung und VOR der Bereinigung
+        # geprüft (zwei Befunde der Gegenprüfung 22.08.2026): (a) Sonst wäre bei
+        # `auftrag` + `notiz` der Auftrag schon überschrieben, während die Notiz
+        # abgewiesen wird — eine halbe Mutation hinter einem Satz, der wie eine
+        # ganze Ablehnung klingt. (b) Sonst hätte die Bereinigung die letzte
+        # Zettelabschrift gerade eingezogen, und der Hinweis „fasse zusammen"
+        # verlangte, Notizen zu verdichten, die das Modell nirgends mehr lesen
+        # kann. Deshalb trägt der Voll-Hinweis den Zettel auch selbst.
+        stand = self._zettel(sitzung)
+        if notiz:
+            zeichen = sum(len(n) for n in stand["notizen"])
+            if (len(stand["notizen"]) >= ZETTEL_NOTIZEN_DECKEL
+                    or zeichen + len(notiz) > ZETTEL_ZEICHEN_DECKEL):
+                self._verlauf_bereinigen()
+                return Response(
+                    message=(
+                        f"Der Merkzettel ist voll ({len(stand['notizen'])} Notizen, {zeichen} "
+                        "Zeichen). Nichts wurde verworfen und auch der Auftrag wurde nicht "
+                        "verändert — verdichte selbst: Rufe `merken` mit `zusammenfassen` und "
+                        "einem kürzeren Gesamtstand auf, dann ist wieder Platz. Was dabei "
+                        "wegfällt, entscheidest du, nicht ein stiller Deckel.\n"
+                        + self._zettelblock(sitzung)
+                    ),
+                    break_loop=False,
+                )
+
+        # Ältere Abschriften des Zettels und alte Wahrnehmungen einziehen, BEVOR
+        # die neue Abschrift entsteht — sonst stünde der Zettel doppelt im Kontext.
+        self._verlauf_bereinigen()
+
+        if auftrag:
+            stand["auftrag"] = auftrag
+        if zusammenfassung:
+            stand["notizen"] = [zusammenfassung]
+        if notiz:
+            stand["notizen"].append(notiz)
+
+        teile = []
+        if auftrag:
+            teile.append("Auftrag festgehalten")
+        if zusammenfassung:
+            teile.append("Notizen durch einen neuen Stand ersetzt")
+        if notiz:
+            teile.append(f"Notiz {len(stand['notizen'])} angehängt")
+        kopf = (
+            "Merkzettel aktualisiert (" + ", ".join(teile) + "). Seine jüngste Abschrift "
+            "bleibt im Kontext — die Seitenwahrnehmungen verschwinden, der Zettel bleibt."
+        )
+        return Response(message=f"{kopf}\n{self._zettelblock(sitzung)}", break_loop=False)
+
+    def _zettelblock(self, sitzung: dict[str, Any]) -> str:
+        """Die eine aktuelle Abschrift des Zettels, für jede Antwort.
+
+        Sie steht VOR der Hülle: Der Zettel ist die eigene Arbeit des Modells,
+        der Seiteninhalt ist Fremdtext — die vertrauenswürdige Zone bleibt
+        zusammenhängend, und die Hülle bleibt der letzte, klar umklammerte Block.
+        """
+        alle = self.agent.context.get_data(ZETTEL_SCHLUESSEL)
+        stand = alle.get("auftrag") if isinstance(alle, dict) else None
+        if not isinstance(stand, dict):
+            return ""
+        auftrag = str(stand.get("auftrag") or "")
+        notizen = [str(n) for n in stand.get("notizen") or [] if str(n)]
+        if not auftrag and not notizen:
+            return ""
+        zeilen = [MERKZETTEL_AUF]
+        if auftrag:
+            zeilen.append(f"Auftrag: {auftrag}")
+        zeilen.extend(f"{nr}. {n}" for nr, n in enumerate(notizen, 1))
+        zeilen.append(MERKZETTEL_ZU)
+        return "\n".join(zeilen)
 
     @staticmethod
     def _grenzen(sitzung: dict[str, Any]) -> dict[str, Any]:
@@ -1019,6 +1219,14 @@ class SMarTrBrowser(Tool):
 
         zeilen.extend(meldungen)
 
+        # Der Merkzettel steht in JEDER Antwort — die Bereinigung hat alle
+        # älteren Abschriften schon eingezogen, im Kontext bleibt genau diese.
+        # So überlebt der Zwischenstand jeden Schritt, obwohl die Wahrnehmungen
+        # verschwinden.
+        zettel = self._zettelblock(sitzung)
+        if zettel:
+            zeilen.append(zettel)
+
         # Die Hülle kommt IMMER aus derselben Hand — auch dann, wenn die Antwort gar
         # keinen Snapshot trägt. `extract` war der einzige Befehl ohne Snapshot und
         # damit bis zum 29.07. der einzige, für den nie eine Hülle entstand; seine
@@ -1082,9 +1290,15 @@ class SMarTrBrowser(Tool):
         if ablauf:
             sekunden = max(0, int(ablauf - time.time()))
             rest = f" · noch {sekunden // 60}:{sekunden % 60:02d} Minuten"
+        zettelstand = ""
+        alle = self.agent.context.get_data(ZETTEL_SCHLUESSEL)
+        stand = alle.get("auftrag") if isinstance(alle, dict) else None
+        if isinstance(stand, dict) and (stand.get("auftrag") or stand.get("notizen")):
+            zettelstand = f" · Merkzettel: {len(stand.get('notizen') or [])} Notizen"
         return (
             f"SMarTrLink-Sitzung {sitzung['code']} · Stufe {stufe} · Bereich {bereichstext} · "
-            f"Schritt {zaehler.get('schritte')} von {int(grenzen.get('schritte') or 40)}{rest}"
+            f"Schritt {zaehler.get('schritte')} von {int(grenzen.get('schritte') or 40)}"
+            f"{rest}{zettelstand}"
         )
 
     @staticmethod
@@ -1291,10 +1505,15 @@ class SMarTrBrowser(Tool):
     def _verlauf_bereinigen(self) -> None:
         """Kürzt alle bisherigen Ergebnisse dieses Werkzeugs auf einen Einzeiler.
 
-        `helpers/history.py:108-109` gibt beim Bauen des Modellkontexts
+        `helpers/history.py` (Message.output) gibt beim Bauen des Modellkontexts
         `self.summary or self.content` aus. Eine gesetzte Zusammenfassung nimmt die
         alte Wahrnehmung damit aus dem Kontext, ohne sie aus dem gespeicherten Chat
         zu löschen — der Mensch kann später alles nachlesen.
+
+        Eingezogen wird beides: alte Seitenwahrnehmungen UND alte Abschriften des
+        Merkzettels. Der Zettel steht in jeder Antwort; ohne den zweiten Marker
+        stapelten sich seine Abschriften im Kontext, und der Kostenhebel würde
+        zum Kostentreiber.
         """
         verlauf = getattr(self.agent, "history", None)
         if verlauf is None:
@@ -1311,8 +1530,9 @@ class SMarTrBrowser(Tool):
                     continue
                 if getattr(nachricht, "summary", ""):
                     continue
-                if HUELLE_AUF not in str(inhalt.get("tool_result", "")):
-                    continue  # Ergebnisse ohne Seiteninhalt sind billig, die bleiben
+                roh = str(inhalt.get("tool_result", ""))
+                if HUELLE_AUF not in roh and MERKZETTEL_AUF not in roh:
+                    continue  # Ergebnisse ohne Seiteninhalt und ohne Zettel sind billig, die bleiben
                 nachricht.set_summary(VERLAUF_STUMMEL)
 
         aktuell = getattr(verlauf, "current", None)
